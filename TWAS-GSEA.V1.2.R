@@ -1,5 +1,4 @@
 #!/usr/bin/Rscript
-# This script was written by Oliver Pain whilst at Cardiff University under the supervision of Richard Anney and Andrew Pocklington.
 start.time <- Sys.time()
 suppressMessages(library("optparse"))
 
@@ -143,7 +142,7 @@ sink(file = paste(opt$output,'.log',sep=''), append = T)
 cat(
 '#################################################################
 # TWAS-based Gene Set Enrichment Analysis
-# V1.2 26/09/2018
+# V1.2 development verion 12/07/2019
 #################################################################
 
 Options are:\n')
