@@ -25,11 +25,11 @@ make_option("--use_alt_id", action="store", default=NA, type='character',
 make_option("--cor_window", action="store", default=5e6, type='numeric',
 	help="Size of window for correlations between genes [optional]"),
 make_option("--min_Ngenes", action="store", default=5, type='numeric',
-	help="Minimum number of available genes required in gene set for analysis [optional]"),
+	help="Minimum number of available/non-zero genes required in gene set/property for analysis [optional]"),
 make_option("--qqplot", action="store", default=T, type='logical',
 	help="Specify as F if you do not want a qqplot [optional]"),
-make_option("--probit_P_as_Z", action="store", default=T, type='logical',
-	help="Specify as F if you want to used abs(TWAS.Z) as the outcome [optional]"),
+make_option("--test_stat", action="store", default='probit_P_as_Z', type='character',
+	help="Specify as 'abs_Z' if you want to used abs(TWAS.Z) as the outcome. Specify as 'raw_Z' to use untransformed TWAS.Z, i.e. retain directionality. [optional]"),
 make_option("--p_cor_method", action="store", default='fdr', type='character',
 	help="Select method for correction of multiple testing. Options are the same as the method option for the p.adjust function [optional]"),
 make_option("--outlier_threshold", action="store", default='-3,6', type='character',
@@ -50,6 +50,8 @@ make_option("--min_r2", action="store", default=0.0001, type='numeric',
 	help="Specify the R2 threshold between genes assuming independence [optional]"),
 make_option("--linear_p_thresh", action="store", default=NA, type='numeric',
 	help="Linear model p-value threshold for mixed model analysis [optional]"),
+make_option("--onesided", action="store", default='greater', type='character',
+	help="Specify direction of one sided hypothesis [optional]"),
 make_option("--output", action="store", default=NA, type='character',
 	help="Output file for results [required]")
 )
@@ -98,6 +100,16 @@ if(opt$self_contained == F & opt$competitive == F){
 	cat('Both competitive and self_contained have been set to false.\n')
 }
 
+if(opt$onesided != 'greater' & opt$onesided != 'less'){
+	cat('onesided must be either greater or less.\n')
+	q()
+}
+
+if(opt$test_stat != 'probit_P_as_Z' & opt$test_stat != 'raw_Z' & opt$test_stat != 'abs_Z'){
+	cat('test_stat must be either probit_P_as_Z, raw_Z or abs_Z.\n')
+	q()
+}
+
 sink()
 
 suppressMessages(library(data.table))
@@ -140,19 +152,20 @@ cat('Analysis started at',as.character(start.time),'\n')
 
 # Read in TWAS results, removing duplicates and rows with missing TWAS.P.
 sink()
-TWAS<-data.frame(fread(opt$twas_results))
+TWAS<-fread(opt$twas_results)
 sink(file = paste(opt$output,'.log',sep=''), append = T)
 cat('TWAS results file contains',dim(TWAS)[1],'rows.\n')
 
 # Update FILE column to match pos file
 tmp<-data.frame(do.call(rbind, strsplit(as.character(TWAS$FILE),'/') ))
 TWAS$FILE<-do.call(paste, c(tmp[,(dim(tmp)[2]-1):dim(tmp)[2]], sep="/"))
+rm(tmp)
 
 # Read in .pos file and update P0 and P1 values (This is abug in FUSION).
-pos<-data.frame(fread(opt$pos))
+pos<-fread(opt$pos)
 TWAS$P0<-NULL
 TWAS$P1<-NULL
-TWAS<-merge(TWAS,pos[c('WGT','P0','P1')],by.x='FILE',by.y='WGT')
+TWAS<-merge(TWAS,pos[,c('WGT','P0','P1')],by.x='FILE',by.y='WGT')
 cat('Positional information is available for',dim(TWAS)[1],'TWAS features.\n')
 
 # Add a .5Mb window to the gene coordinates as this is the window for including SNPs as predictors
@@ -193,21 +206,30 @@ if(opt$allow_duplicate_ID == F){
 	cat('Duplicate IDs removed, leaving',dim(TWAS)[1],'features.\n')
 }
 
-if(opt$probit_P_as_Z == T){
+if(opt$test_stat == 'probit_P_as_Z'){
 	# Create a normally distributed absolute TWAS.Z value using a probit transformation
 	TWAS$ZSCORE<-probit(1-TWAS$TWAS.P)
 	TWAS$ZSCORE[TWAS$ZSCORE < opt$outlier_threshold[1]] <- opt$outlier_threshold[1]
 	TWAS$ZSCORE[TWAS$ZSCORE > opt$outlier_threshold[2]] <- opt$outlier_threshold[2]
-} else {
+}
+	
+if(opt$test_stat == 'abs_Z'){
 	# Remove the sign from TWAS.Z values
 	TWAS$ZSCORE<-abs(TWAS$TWAS.Z)
+	TWAS$ZSCORE[TWAS$ZSCORE > opt$outlier_threshold[2]] <- opt$outlier_threshold[2]
+}
+
+if(opt$test_stat == 'raw_Z'){
+	# Use untransformed TWAS Z score
+	TWAS$ZSCORE<-TWAS$TWAS.Z
+	TWAS$ZSCORE[TWAS$ZSCORE < opt$outlier_threshold[1]] <- opt$outlier_threshold[1]
 	TWAS$ZSCORE[TWAS$ZSCORE > opt$outlier_threshold[2]] <- opt$outlier_threshold[2]
 }
 
 if(is.na(opt$use_alt_id)){
 	# Merge TWAS data with reference to retrieve entrez IDs
 	ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", GRCh=37)
-	Genes<-getBM(attributes=c('external_gene_name','entrezgene'), mart = ensembl)
+	Genes<-getBM(attributes=c('external_gene_name','entrezgene_id'), mart = ensembl)
 
 	# Remove genes from ensembl info that have duplicate IDs
 	Genes<-Genes[!is.na(Genes$entrezgene),]
@@ -218,6 +240,8 @@ if(is.na(opt$use_alt_id)){
 	# Merge TWAS with ensembl info
 	TWAS<-merge(TWAS, Genes, by.x='ID', by.y='external_gene_name')
 	cat(dim(TWAS)[1],'features have entrez IDs.\n')
+	
+	rm(ensembl,Genes)
 }
 
 if(is.na(opt$gmt_file) == F){
@@ -251,10 +275,16 @@ if(is.na(opt$gmt_file) == F){
 if(is.na(opt$prop_file) == F){
 	# Read in gene property file
 	sink()
-	gene_prop<-data.frame(fread(opt$prop_file))
+	gene_prop<-fread(opt$prop_file)	
+	names(gene_prop)<-gsub("[[:punct:]]", ".", names(gene_prop))
+	names(gene_prop)<-gsub(" ", ".", names(gene_prop))
+	
 	sink(file = paste(opt$output,'.log',sep=''), append = T)
-
 	cat('Gene property file contained', dim(gene_prop)[2]-1,'properties.\n')
+
+	gene_prop<-gene_prop[,which(!duplicated(names(gene_prop))), with=F]
+	
+	cat(dim(gene_prop)[2]-1, 'gene properties remain after removing those with duplicate names.\n')
 
 	# Merge with the TWAS data
 	if(is.na(opt$use_alt_id)){
@@ -262,17 +292,36 @@ if(is.na(opt$prop_file) == F){
 	} else {
 		TWAS_GS_Prop<-merge(TWAS, gene_prop, by.x='Alt_ID', by.y='ID')
 	}
-	
-	for(i in names(gene_prop[-1])){
+			
+	for(i in names(gene_prop)[-1]){
 		TWAS_GS_Prop[[i]]<-as.numeric(scale(TWAS_GS_Prop[[i]]))
 	}
-
+	
+	# Remove gene properties where less than min_Ngenes genes are non-zero or NA
+	property_n<-NULL
+	for(i in names(gene_prop)[-1]){
+		property_n<-rbind(property_n,data.frame(ID=i, Ngene=sum(sum(TWAS_GS_Prop[[i]] != 0, na.rm=T), sum(!is.na(TWAS_GS_Prop[[i]])))))
+	}
+	
+	property_excl<-property_n[property_n$Ngene < opt$min_Ngenes,]
+	
+	gene_prop<-gene_prop[,which(!(names(gene_prop) %in% property_excl$ID)),with=F]
+	
 	TWAS_GS_Mem_clean<-TWAS_GS_Prop
 
 	cat(dim(TWAS_GS_Mem_clean)[1],'genes will be included in the gene property analysis.\n')
 
-	gene_sets_clean<-names(gene_prop[-1])
+	gene_sets_clean<-names(gene_prop)[-1]
+	rm(gene_prop,property_n,property_excl,TWAS_GS_Prop)
 }
+
+rm(TWAS)
+
+sink()
+gc()
+sink(file = paste(opt$output,'.log',sep=''), append = T)
+
+TWAS_GS_Mem_clean<-data.frame(TWAS_GS_Mem_clean)
 
 #########
 # Perform standard linear regression without accounting for correlation between genes.
@@ -305,21 +354,40 @@ Linear_Results<-foreach(i=1:length(gene_sets_clean), .combine=rbind) %dopar% {
 	if(i == floor(length(gene_sets_clean)/100*90)){cat('90% ')}
 	if(i == floor(length(gene_sets_clean)/100*100)){cat('100% ')}
 	
-	if(is.na(opt$prop_file)){
-		data.frame(	GeneSet=gene_sets_clean[i],
+	if(opt$onesided == 'greater'){
+		if(is.na(opt$prop_file)){
+			data.frame(	GeneSet=gene_sets_clean[i],
+						Est=coef(sum)[2, 1],
+						SE=coef(sum)[2, 2],
+						T=coef(sum)[2, 3],
+						N_Mem_Avail=sum(TWAS_GS_Mem_clean[c(gene_sets_clean[i])]==T),
+						N_Mem=length(gene_sets[[which(names(gene_sets) == gene_sets_clean[i])]]),
+						P=pt(coef(sum)[2, 3], sum$df, lower=FALSE))
+		} else {
+			data.frame(	GeneSet=gene_sets_clean[i],
 					Est=coef(sum)[2, 1],
 					SE=coef(sum)[2, 2],
 					T=coef(sum)[2, 3],
-					N_Mem_Avail=sum(TWAS_GS_Mem_clean[c(gene_sets_clean[i])]==T),
-					N_Mem=length(gene_sets[[which(names(gene_sets) == gene_sets_clean[i])]]),
 					P=pt(coef(sum)[2, 3], sum$df, lower=FALSE))
+		}
 	} else {
-		data.frame(	GeneSet=gene_sets_clean[i],
-				Est=coef(sum)[2, 1],
-				SE=coef(sum)[2, 2],
-				T=coef(sum)[2, 3],
-				P=pt(coef(sum)[2, 3], sum$df, lower=FALSE))
+		if(is.na(opt$prop_file)){
+			data.frame(	GeneSet=gene_sets_clean[i],
+						Est=coef(sum)[2, 1],
+						SE=coef(sum)[2, 2],
+						T=coef(sum)[2, 3],
+						N_Mem_Avail=sum(TWAS_GS_Mem_clean[c(gene_sets_clean[i])]==T),
+						N_Mem=length(gene_sets[[which(names(gene_sets) == gene_sets_clean[i])]]),
+						P=pt(coef(sum)[2, 3], sum$df, lower=TRUE))
+		} else {
+			data.frame(	GeneSet=gene_sets_clean[i],
+					Est=coef(sum)[2, 1],
+					SE=coef(sum)[2, 2],
+					T=coef(sum)[2, 3],
+					P=pt(coef(sum)[2, 3], sum$df, lower=TRUE))
+		}
 	}
+
 }
 cat('Done!\n')
 
@@ -381,7 +449,7 @@ if(length(gene_sets_clean_forMLM) > 0 & (opt$competitive == T | opt$self_contain
 		# Read in predicted gene expression values for this set of tissue weights
 		sink()
 		if(substr(opt$expression_ref,(nchar(opt$expression_ref)+1)-3,nchar(opt$expression_ref)) == '.gz'){
-			GeneX_all<-data.frame(fread(paste0('zcat ',opt$expression_ref)))
+			GeneX_all<-data.frame(fread(cmd=paste0('zcat ',opt$expression_ref)))
 		} else {	
 			GeneX_all<-data.frame(fread(opt$expression_ref))
 		}
@@ -561,22 +629,42 @@ if(length(gene_sets_clean_forMLM) != 0){
 			if(i == floor(length(gene_sets_clean_forMLM)/100*90)){cat('90% ')}
 			if(i == floor(length(gene_sets_clean_forMLM)/100*100)){cat('100% ')}
 			
-			if(is.na(opt$prop_file)){
-				data.frame(	GeneSet=gene_sets_clean_forMLM[i],
-							Estimate=coefs$Estimate[2],
-							SE=coefs$Std..Error[2],
-							T=coefs$t.value[2],
-							N_Mem_Avail=sum(TWAS_GS_Mem_clean[c(gene_sets_clean[i])]==T),
-							N_Mem=length(gene_sets[[which(names(gene_sets) == gene_sets_clean[i])]]),
-							P=(1 - pnorm(coefs$t.value[2])),
-							row.names=paste(i))
+			if(opt$onesided == 'greater'){
+				if(is.na(opt$prop_file)){
+					data.frame(	GeneSet=gene_sets_clean_forMLM[i],
+								Estimate=coefs$Estimate[2],
+								SE=coefs$Std..Error[2],
+								T=coefs$t.value[2],
+								N_Mem_Avail=sum(TWAS_GS_Mem_clean[c(gene_sets_clean[i])]==T),
+								N_Mem=length(gene_sets[[which(names(gene_sets) == gene_sets_clean[i])]]),
+								P=pnorm(coefs$t.value[2], lower=F),
+								row.names=paste(i))
+				} else {
+					data.frame(	GeneSet=gene_sets_clean_forMLM[i],
+								Estimate=coefs$Estimate[2],
+								SE=coefs$Std..Error[2],
+								T=coefs$t.value[2],
+								P=pnorm(coefs$t.value[2], lower=F),
+								row.names=paste(i))
+				}
 			} else {
-				data.frame(	GeneSet=gene_sets_clean_forMLM[i],
-							Estimate=coefs$Estimate[2],
-							SE=coefs$Std..Error[2],
-							T=coefs$t.value[2],
-							P=(1 - pnorm(coefs$t.value[2])),
-							row.names=paste(i))
+				if(is.na(opt$prop_file)){
+					data.frame(	GeneSet=gene_sets_clean_forMLM[i],
+								Estimate=coefs$Estimate[2],
+								SE=coefs$Std..Error[2],
+								T=coefs$t.value[2],
+								N_Mem_Avail=sum(TWAS_GS_Mem_clean[c(gene_sets_clean[i])]==T),
+								N_Mem=length(gene_sets[[which(names(gene_sets) == gene_sets_clean[i])]]),
+								P=pnorm(coefs$t.value[2], lower=T),
+								row.names=paste(i))
+				} else {
+					data.frame(	GeneSet=gene_sets_clean_forMLM[i],
+								Estimate=coefs$Estimate[2],
+								SE=coefs$Std..Error[2],
+								T=coefs$t.value[2],
+								P=pnorm(coefs$t.value[2], lower=T),
+								row.names=paste(i))
+				}
 			}
 		}
 		cat('Done!\n')
@@ -602,22 +690,43 @@ if(opt$self_contained == T){
 			if(i == floor(length(gene_sets_clean)/100*80)){cat('80% ')}
 			if(i == floor(length(gene_sets_clean)/100*90)){cat('90% ')}
 			if(i == floor(length(gene_sets_clean)/100*100)){cat('100% ')}
-			if(is.na(opt$prop_file)){
-				data.frame(	GeneSet=gene_sets_clean[i],
-							Estimate=coefs$Estimate[1],
-							SE=coefs$Std..Error[1],
-							T=coefs$t.value[1],
-							N_Mem_Avail=sum(TWAS_GS_Mem_clean[c(gene_sets_clean[i])]==T),
-							N_Mem=length(gene_sets[[which(names(gene_sets) == gene_sets_clean[i])]]),
-							P=(1 - pt(coefs$t.value[1], df.KR,lower=T)),
-							row.names=paste(i))
+			
+			if(opt$onesided == 'greater'){
+				if(is.na(opt$prop_file)){
+					data.frame(	GeneSet=gene_sets_clean[i],
+								Estimate=coefs$Estimate[1],
+								SE=coefs$Std..Error[1],
+								T=coefs$t.value[1],
+								N_Mem_Avail=sum(TWAS_GS_Mem_clean[c(gene_sets_clean[i])]==T),
+								N_Mem=length(gene_sets[[which(names(gene_sets) == gene_sets_clean[i])]]),
+								P=(pt(coefs$t.value[1], df.KR,lower=F)),
+								row.names=paste(i))
+				} else {
+					data.frame(	GeneSet=gene_sets_clean[i],
+								Estimate=coefs$Estimate[1],
+								SE=coefs$Std..Error[1],
+								T=coefs$t.value[1],
+								P=(pt(coefs$t.value[1], df.KR,lower=F)),
+								row.names=paste(i))
+				}
 			} else {
-				data.frame(	GeneSet=gene_sets_clean[i],
-							Estimate=coefs$Estimate[1],
-							SE=coefs$Std..Error[1],
-							T=coefs$t.value[1],
-							P=(1 - pt(coefs$t.value[1], df.KR,lower=T)),
-							row.names=paste(i))
+				if(is.na(opt$prop_file)){
+					data.frame(	GeneSet=gene_sets_clean[i],
+								Estimate=coefs$Estimate[1],
+								SE=coefs$Std..Error[1],
+								T=coefs$t.value[1],
+								N_Mem_Avail=sum(TWAS_GS_Mem_clean[c(gene_sets_clean[i])]==T),
+								N_Mem=length(gene_sets[[which(names(gene_sets) == gene_sets_clean[i])]]),
+								P=(pt(coefs$t.value[1], df.KR,lower=T)),
+								row.names=paste(i))
+				} else {
+					data.frame(	GeneSet=gene_sets_clean[i],
+								Estimate=coefs$Estimate[1],
+								SE=coefs$Std..Error[1],
+								T=coefs$t.value[1],
+								P=(pt(coefs$t.value[1], df.KR,lower=T)),
+								row.names=paste(i))
+				}
 			}
 		}
 	}
