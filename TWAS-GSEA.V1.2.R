@@ -387,7 +387,6 @@ Linear_Results<-foreach(i=1:length(gene_sets_clean), .combine=rbind) %dopar% {
 					P=pt(coef(sum)[2, 3], sum$df, lower=TRUE))
 		}
 	}
-
 }
 cat('Done!\n')
 
