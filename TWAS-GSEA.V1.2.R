@@ -3,6 +3,50 @@
 start.time <- Sys.time()
 suppressMessages(library("optparse"))
 
+r_pkgs <- c('BiocManager','devtools','data.table','optparse','Matrix','VGAM','gdata','lme4','matrixcalc','pbkrtest','foreach','doMC','scales')
+bio_pkgs <- c('GWASTools','biomaRt','qusage', 'GO.db', 'impute', 'preprocessCore', 'WGCNA')
+dev_pkg <- c('variani/lme4qtl')
+
+local({r <- getOption('repos')                                                                                                                                
+      r['CRAN'] <- 'http://www.stats.bris.ac.uk/R/'                                                                                                          
+      options(repos=r)                    
+})
+
+for (pkg in r_pkgs) {
+    if(!eval(bquote(require(.(pkg))))) {
+        eval(bquote(install.packages(.(pkg), dependencies=T)))
+    }
+}
+
+#for (pkg in r_pkgs){
+#    eval(bquote(library(.(pkg))))
+#}
+
+library(BiocManager)
+
+for (pkg in bio_pkgs) {
+    if(!eval(bquote(require(.(pkg))))) {
+        eval(bquote(BiocManager::install(.(pkg), dependencies=T)))
+    }
+}
+
+#for (pkg in bio_pkgs){
+#    eval(bquote(library(.(pkg))))
+#}
+
+library(devtools)
+
+for (pkg in dev_pkgs) {
+    if(!eval(bquote(require(.(pkg))))) {
+        eval(bquote(install_github(.(pkg))))
+    }
+}
+
+#for (pkg in dev_pkgs){
+#    eval(bquote(library(.(pkg))))
+#}
+
+
 option_list = list(
 make_option("--twas_results", action="store", default=NA, type='character',
 	help="File containing TWAS results [required]"),
